@@ -31,7 +31,7 @@ This project analyzes Major League Baseball (MLB) pitch arsenals to identify the
 - Five-pitch mixes that include both a high-spin fastball and a changeup outperform limited arsenals in expected run value.
 - Sequencing analysis suggests pitchers gain measurable advantage by alternating velocity ranges rather than repeating similar speeds.
 
-
-
-Sequencing analysis suggests pitchers gain measurable advantage by alternating velocity ranges rather than repeating similar speeds.
+# Author
+## Daiki Sai
+daikisai77@gmail.com | https://www.linkedin.com/in/daiki-sai/
 
