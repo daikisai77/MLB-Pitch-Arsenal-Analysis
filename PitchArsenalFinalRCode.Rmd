@@ -1,0 +1,570 @@
+---
+title: "Untitled"
+output: html_document
+date: "2025-04-18"
+---
+```{r}
+library(tidyverse)
+
+# ================================
+# STEP 1: Evaluate All Individual Pitch Types
+# ================================
+# Load data from 2022–2024
+paths <- list.files("C:/Users/dsai3/Downloads", pattern = "pitch-arsenal-stats-20.*csv", full.names = TRUE)
+arsenal_all <- paths %>%
+  map_df(read_csv, show_col_types = FALSE)
+
+# Combine pitch data across years
+arsenal <- arsenal_all %>%
+  mutate(pitch_type = str_trim(pitch_type),
+         player_id = as.character(player_id))
+pitch_effectiveness <- arsenal %>%
+  group_by(pitch_type) %>%
+  summarise(
+    avg_run_value = mean(run_value_per_100, na.rm = TRUE),
+    avg_whiff = mean(whiff_percent, na.rm = TRUE),
+    avg_hard_hit = mean(hard_hit_percent, na.rm = TRUE),
+    count = n(),
+    .groups = "drop"
+  )
+View(pitch_effectiveness)
+```
+
+```{r}
+# ================================
+# STEP 2: Generate All Possible 2- and 3-Pitch Combos
+# ================================
+all_pitch_types <- sort(unique(arsenal$pitch_type))
+
+two_pitch_combos <- combn(all_pitch_types, 2, simplify = FALSE)
+three_pitch_combos <- combn(all_pitch_types, 3, simplify = FALSE)
+
+```
+
+```{r}
+# ================================
+# STEP 3: Score Submixes from Pitch-Level Effectiveness
+# ================================
+
+# Function to score combos
+score_combo <- function(combo) {
+  stats <- pitch_effectiveness %>% filter(pitch_type %in% combo)
+  tibble(
+    combo = paste(sort(combo), collapse = "-"),
+    avg_run_value = mean(stats$avg_run_value, na.rm = TRUE),
+    avg_whiff = mean(stats$avg_whiff, na.rm = TRUE),
+    avg_hard_hit = mean(stats$avg_hard_hit, na.rm = TRUE)
+  )
+}
+
+# Apply to all 2- and 3-pitch combos
+pair_summary <- map_dfr(two_pitch_combos, score_combo) %>%
+  rename(pitch_pair = combo)
+
+trio_summary <- map_dfr(three_pitch_combos, score_combo) %>%
+  rename(pitch_trio = combo)
+
+```
+
+```{r}
+# ================================
+# STEP 4: Define Prediction Function
+# ================================
+
+simulate_velocities <- function(pitches) {
+  setNames(runif(length(pitches), min = -0.01, max = 0.15), pitches)
+}
+
+predict_run_value <- function(pitch_mix, velocities, model, pair_df, trio_df) {
+  stopifnot(length(pitch_mix) == 5, length(velocities) == 5)
+
+  pairs <- combn(pitch_mix, 2, simplify = FALSE)
+  trios <- combn(pitch_mix, 3, simplify = FALSE)
+
+  pair_scores <- map_dbl(pairs, function(p) {
+    key <- paste(sort(p), collapse = "-")
+    pair_df %>% filter(pitch_pair == key) %>% pull(avg_run_value) %>% mean(na.rm = TRUE)
+  })
+
+  trio_scores <- map_dbl(trios, function(t) {
+    key <- paste(sort(t), collapse = "-")
+    trio_df %>% filter(pitch_trio == key) %>% pull(avg_run_value) %>% mean(na.rm = TRUE)
+  })
+
+  df <- tibble(
+    pair_score_avg = mean(pair_scores, na.rm = TRUE),
+    trio_score_avg = mean(trio_scores, na.rm = TRUE),
+    mean_velocity = mean(velocities),
+    velocity_range = max(velocities) - min(velocities),
+    velocity_sd = sd(velocities)
+  )
+
+  predict(model, newdata = df)
+}
+
+```
+
+```{r}
+# ================================
+# STEP 5: Simulate and Score All 5-Pitch Mixes
+# ================================
+five_pitch_combos <- combn(all_pitch_types, 5, simplify = FALSE)
+
+predicted_combos <- map_dfr(five_pitch_combos, function(pitches) {
+  velocity_vector <- simulate_velocities(pitches)
+
+  predicted <- predict_run_value(
+    pitch_mix = pitches,
+    velocities = unname(velocity_vector),
+    model = lm_model,
+    pair_df = pair_summary,
+    trio_df = trio_summary
+  )
+
+  tibble(
+    pitch_mix = paste(sort(pitches), collapse = "-"),
+    predicted_run_value = predicted,
+    mean_velocity = mean(velocity_vector),
+    velocity_range = max(velocity_vector) - min(velocity_vector),
+    velocity_sd = sd(velocity_vector)
+  )
+}) %>%
+  arrange(desc(predicted_run_value))
+
+```
+
+```{r}
+lm_model <- lm(avg_run_value ~ pair_score_avg + trio_score_avg + mean_velocity + velocity_range + velocity_sd, data = model_data)
+
+model_data <- model_data %>%
+  mutate(predicted = predict(lm_model, newdata = model_data),
+         residual = avg_run_value - predicted)
+
+# Mean Absolute Error
+mae <- mean(abs(model_data$residual))
+
+# Root Mean Squared Error
+rmse <- sqrt(mean(model_data$residual^2))
+
+# R-squared (already included in summary)
+r_squared <- summary(lm_model)$r.squared
+
+# Print results
+```
+
+
+```{r}
+cat("Linear Regression Model Evaluation Metrics:\n")
+cat(paste("MAE:  ", round(mae, 3), "\n"))
+cat(paste("RMSE: ", round(rmse, 3), "\n"))
+cat(paste("R²:   ", round(r_squared, 3), "\n"))
+
+library(ggplot2)
+
+ggplot(model_data, aes(x = avg_run_value, y = predicted)) +
+  geom_point(alpha = 0.6) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "blue") +
+  theme_minimal() +
+  labs(title = "Predicted vs Actual Run Value",
+       x = "Actual Run Value",
+       y = "Predicted Run Value")
+
+ggplot(model_data, aes(x = predicted, y = residual)) +
+  geom_point(alpha = 0.6) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  theme_minimal() +
+  labs(title = "Residuals vs Predicted",
+       x = "Predicted Run Value",
+       y = "Residual")
+
+```
+
+```{r}
+# Get coefficients from the linear model
+importance_df <- summary(lm_model)$coefficients %>%
+  as.data.frame() %>%
+  rownames_to_column("Feature") %>%
+  filter(Feature != "(Intercept)") %>%
+  mutate(Importance = abs(Estimate)) %>%
+  arrange(desc(Importance))
+
+# Plot
+library(ggplot2)
+ggplot(importance_df, aes(x = reorder(Feature, Importance), y = Importance)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Feature Importance (Linear Regression)",
+       x = "Feature",
+       y = "|Coefficient| (Magnitude)")
+
+```
+```{r}
+library(randomForest)
+
+# Train random forest on the same features as your linear model
+set.seed(42)
+rf_model <- randomForest(
+  avg_run_value ~ pair_score_avg + trio_score_avg + mean_velocity + velocity_range + velocity_sd,
+  data = model_data,
+  ntree = 500,
+  importance = TRUE
+)
+
+# Add predictions and residuals
+model_data <- model_data %>%
+  mutate(rf_predicted = predict(rf_model),
+         rf_residual = avg_run_value - rf_predicted)
+
+# Mean Absolute Error
+rf_mae <- mean(abs(model_data$rf_residual))
+
+# Root Mean Squared Error
+rf_rmse <- sqrt(mean(model_data$rf_residual^2))
+
+# R-squared (calculated manually for RF)
+ss_total <- sum((model_data$avg_run_value - mean(model_data$avg_run_value))^2)
+ss_resid <- sum(model_data$rf_residual^2)
+rf_r_squared <- 1 - ss_resid / ss_total
+
+# Print results
+cat("Random Forest Evaluation Metrics:\n")
+cat(paste("MAE:  ", round(rf_mae, 3), "\n"))
+cat(paste("RMSE: ", round(rf_rmse, 3), "\n"))
+cat(paste("R²:   ", round(rf_r_squared, 3), "\n"))
+
+library(ggplot2)
+
+ggplot(model_data, aes(x = avg_run_value, y = rf_predicted)) +
+  geom_point(alpha = 0.6) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "blue") +
+  theme_minimal() +
+  labs(title = "Random Forest: Predicted vs Actual Run Value",
+       x = "Actual Run Value",
+       y = "Predicted Run Value")
+
+rf_importance <- as.data.frame(importance(rf_model))
+rf_importance$Feature <- rownames(rf_importance)
+
+ggplot(rf_importance, aes(x = reorder(Feature, `%IncMSE`), y = `%IncMSE`)) +
+  geom_col(fill = "darkgreen") +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Feature Importance (Random Forest)",
+       x = "Feature",
+       y = "% Increase in MSE")
+
+```
+
+```{r}
+# Recalculate features for each 5-pitch combo
+predicted_combos <- map_dfr(five_pitch_combos, function(pitches) {
+  # Simulate estimated velocities
+  velocity_vector <- simulate_velocities(pitches)
+
+  # Calculate pair and trio scores
+  pairs <- combn(pitches, 2, simplify = FALSE)
+  trios <- combn(pitches, 3, simplify = FALSE)
+
+  pair_scores <- map_dbl(pairs, function(p) {
+    key <- paste(sort(p), collapse = "-")
+    pair_summary %>% filter(pitch_pair == key) %>% pull(avg_run_value) %>% mean(na.rm = TRUE)
+  })
+
+  trio_scores <- map_dbl(trios, function(t) {
+    key <- paste(sort(t), collapse = "-")
+    trio_summary %>% filter(pitch_trio == key) %>% pull(avg_run_value) %>% mean(na.rm = TRUE)
+  })
+
+  tibble(
+    pitch_mix = paste(sort(pitches), collapse = "-"),
+    pair_score_avg = mean(pair_scores, na.rm = TRUE),
+    trio_score_avg = mean(trio_scores, na.rm = TRUE),
+    mean_velocity = mean(velocity_vector),
+    velocity_range = max(velocity_vector) - min(velocity_vector),
+    velocity_sd = sd(velocity_vector)
+  )
+})
+
+
+```
+
+```{r}
+# Predict using both models
+predicted_combos <- predicted_combos %>%
+  mutate(
+    lm_score = predict(lm_model, newdata = .),
+    rf_score = predict(rf_model, newdata = .)
+  )
+
+
+```
+
+```{r}
+# Top 10 from linear model
+top_lm <- predicted_combos %>%
+  arrange(desc(lm_score)) %>%
+  slice_head(n = 10) %>%
+  select(pitch_mix, lm_score)
+
+# Top 10 from random forest
+top_rf <- predicted_combos %>%
+  arrange(desc(rf_score)) %>%
+  slice_head(n = 10) %>%
+  select(pitch_mix, rf_score)
+
+top10_lm <- predicted_combos %>%
+  arrange(desc(lm_score)) %>%
+  slice_head(n = 10) %>%
+  select(pitch_mix, lm_score)
+
+print(top10_lm)
+
+top10_rf <- predicted_combos %>%
+  arrange(desc(rf_score)) %>%
+  slice_head(n = 10) %>%
+  select(pitch_mix, rf_score)
+
+print(top10_rf)
+
+
+
+```
+
+```{r}
+
+library(xgboost)
+
+# Convert to matrix
+xgb_features <- model_data %>%
+  select(-avg_run_value) %>%
+  as.matrix()
+xgb_label <- model_data$avg_run_value
+
+# Train
+xgb_model <- xgboost(data = xgb_features, label = xgb_label, nrounds = 100, objective = "reg:squarederror", verbose = 0)
+
+# Predict
+model_data$xgb_predicted <- predict(xgb_model, xgb_features)
+
+# Evaluate
+xgb_mae <- mean(abs(model_data$avg_run_value - model_data$xgb_predicted))
+xgb_rmse <- sqrt(mean((model_data$avg_run_value - model_data$xgb_predicted)^2))
+xgb_r2 <- 1 - sum((model_data$avg_run_value - model_data$xgb_predicted)^2) / sum((model_data$avg_run_value - mean(model_data$avg_run_value))^2)
+
+# Print results
+cat("XGBoost Evaluation Metrics:\n")
+cat(paste("MAE:  ", round(xgb_mae, 3), "\n"))
+cat(paste("RMSE: ", round(xgb_rmse, 3), "\n"))
+cat(paste("R²:   ", round(xgb_r2, 3), "\n"))
+
+```
+
+```{r}
+library(ggplot2)
+
+# Predicted vs Actual
+ggplot(model_data, aes(x = avg_run_value, y = xgb_predicted)) +
+  geom_point(alpha = 0.6) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "blue") +
+  theme_minimal() +
+  labs(title = "XGBoost: Predicted vs Actual Run Value",
+       x = "Actual Run Value",
+       y = "Predicted Run Value")
+
+# Residuals vs Predicted
+ggplot(model_data, aes(x = xgb_predicted, y = xgb_residual)) +
+  geom_point(alpha = 0.6) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  theme_minimal() +
+  labs(title = "XGBoost: Residuals vs Predicted",
+       x = "Predicted Run Value",
+       y = "Residual")
+  
+```
+
+
+```{r}
+library(FNN)
+
+# Normalize features
+normalized <- scale(model_data %>% select(-avg_run_value))
+
+# Train/Test Split
+set.seed(42)
+n <- nrow(model_data)
+train_idx <- sample(1:n, 0.8 * n)
+train_X <- normalized[train_idx, ]
+test_X <- normalized[-train_idx, ]
+train_y <- model_data$avg_run_value[train_idx]
+test_y <- model_data$avg_run_value[-train_idx]
+
+# Fit KNN (k = 5)
+knn_preds <- knn.reg(train = train_X, test = test_X, y = train_y, k = 5)$pred
+
+# Evaluate
+knn_mae <- mean(abs(test_y - knn_preds))
+knn_rmse <- sqrt(mean((test_y - knn_preds)^2))
+knn_r2 <- 1 - sum((test_y - knn_preds)^2) / sum((test_y - mean(test_y))^2)
+
+cat("KNN Evaluation Metrics:\n")
+cat(paste("MAE:  ", round(knn_mae, 3), "\n"))
+cat(paste("RMSE: ", round(knn_rmse, 3), "\n"))
+cat(paste("R²:   ", round(knn_r2, 3), "\n"))
+
+```
+```{r}
+# Predicted vs Actual (Test Set)
+ggplot(data.frame(actual = test_y, predicted = knn_preds), aes(x = actual, y = predicted)) +
+  geom_point(alpha = 0.6) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "blue") +
+  theme_minimal() +
+  labs(title = "KNN: Predicted vs Actual Run Value (Test Set)",
+       x = "Actual Run Value",
+       y = "Predicted Run Value")
+
+# Residuals vs Predicted
+ggplot(data.frame(predicted = knn_preds, residual = test_y - knn_preds), aes(x = predicted, y = residual)) +
+  geom_point(alpha = 0.6) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  theme_minimal() +
+  labs(title = "KNN: Residuals vs Predicted (Test Set)",
+       x = "Predicted Run Value",
+       y = "Residual")
+
+```
+
+```{r}
+# Normalize predicted_combos features using same scaling as model_data
+library(scales)
+
+# Get feature columns
+feature_cols <- c("pair_score_avg", "trio_score_avg", "mean_velocity", "velocity_range", "velocity_sd")
+
+# Normalize using full model_data
+mean_vals <- apply(model_data[, feature_cols], 2, mean)
+sd_vals <- apply(model_data[, feature_cols], 2, sd)
+
+normalized_pred_combos <- as.data.frame(scale(predicted_combos[, feature_cols], center = mean_vals, scale = sd_vals))
+
+# Fit KNN (k = 5) using full model_data
+knn_scores <- knn.reg(train = scale(model_data[, feature_cols]), test = normalized_pred_combos, y = model_data$avg_run_value, k = 5)$pred
+
+# Add predictions back
+predicted_combos$knn_score <- knn_scores
+
+
+
+# Get top 10 KNN-predicted mixes
+top10_knn <- predicted_combos %>%
+  arrange(desc(knn_score)) %>%
+  slice_head(n = 10) %>%
+  select(pitch_mix, knn_score)
+
+print(top10_knn)
+
+
+```
+
+```{r}
+# Step 1: Baseline MAE
+baseline_mae <- mean(abs(test_y - knn_preds))
+
+# Step 2: Define permutation function
+perm_importance_knn <- function(feature_name) {
+  permuted_data <- test_X
+  permuted_data[, feature_name] <- sample(permuted_data[, feature_name])
+  
+  permuted_preds <- knn.reg(train = train_X, test = permuted_data, y = train_y, k = 5)$pred
+  permuted_mae <- mean(abs(test_y - permuted_preds))
+  
+  return(permuted_mae - baseline_mae)  # increase in error
+}
+
+# Step 3: Loop over all features
+feature_names <- colnames(test_X)
+
+knn_importance <- sapply(feature_names, perm_importance_knn)
+importance_df <- data.frame(
+  Feature = feature_names,
+  Permutation_Impact = knn_importance
+)
+
+# Step 4: Plot
+library(ggplot2)
+ggplot(importance_df, aes(x = reorder(Feature, Permutation_Impact), y = Permutation_Impact)) +
+  geom_col(fill = "darkred") +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "KNN Feature Importance (Permutation Method)",
+       x = "Feature",
+       y = "Increase in MAE when Permuted")
+
+```
+```{r}
+library(dplyr)
+library(tibble)
+library(scales)
+
+# -----------------------------
+# Step 1: Build model_data with identifiers
+# -----------------------------
+model_data <- arsenal %>%
+  group_by(player_id) %>%
+  arrange(desc(pitch_usage), .by_group = TRUE) %>%
+  slice_head(n = 5) %>%
+  summarise(
+    pitch_penta = paste(sort(pitch_type), collapse = "-"),
+    pair_score_avg = mean(run_value_per_100, na.rm = TRUE),  # or from precomputed pair matrix
+    trio_score_avg = mean(run_value_per_100, na.rm = TRUE),
+    mean_velocity = mean(est_slg - slg, na.rm = TRUE),
+    velocity_range = max(est_slg - slg, na.rm = TRUE) - min(est_slg - slg, na.rm = TRUE),
+    velocity_sd = sd(est_slg - slg, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  left_join(
+    arsenal %>% select(player_id, `last_name, first_name`) %>% distinct(),
+    by = "player_id"
+  )
+
+# -----------------------------
+# Step 2: Normalize the model_data and predicted_combos
+# -----------------------------
+feature_cols <- c("pair_score_avg", "trio_score_avg", "mean_velocity", "velocity_range", "velocity_sd")
+
+# Calculate mean and sd for scaling
+means <- apply(model_data[, feature_cols], 2, mean)
+sds <- apply(model_data[, feature_cols], 2, sd)
+
+# Normalize model_data
+model_data_scaled <- as.data.frame(scale(model_data[, feature_cols], center = means, scale = sds))
+
+# -----------------------------
+# Step 3: Pull the top KNN pitch mix and normalize it
+# -----------------------------
+top_knn_mix <- predicted_combos %>%
+  arrange(desc(knn_score)) %>%
+  slice_head(n = 1)
+
+top_mix_scaled <- as.data.frame(scale(top_knn_mix[, feature_cols], center = means, scale = sds))
+
+# -----------------------------
+# Step 4: Compute Euclidean distance from each pitcher to top mix
+# -----------------------------
+model_data$distance_to_top_mix <- apply(model_data_scaled, 1, function(row) {
+  sqrt(sum((row - top_mix_scaled)^2))
+})
+
+# -----------------------------
+# Step 5: Return 10 most similar pitchers
+# -----------------------------
+similar_pitchers <- model_data %>%
+  arrange(distance_to_top_mix) %>%
+  select(`last_name, first_name`, pitch_penta, distance_to_top_mix) %>%
+  slice_head(n = 10)
+
+print(similar_pitchers)
+
+
+```
+
